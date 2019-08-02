@@ -258,7 +258,13 @@ def detect_face(img, minsize, PNet, RNet, ONet, threshold, fastresize, factor,fi
             factor_count += 1
         scales = [0.128, 0.08, 0.148, 0.4, 0.1]
     else:
+        scales = []
+        while minl >= 12:
+            scales.append(m * pow(factor, factor_count))
+            minl *= factor
+            factor_count += 1
         scales = [0.75]
+    
     # first stage
     #scales = [0.128, 0.08, 0.148, 0.4, 0.1]
     #tic()
@@ -557,8 +563,9 @@ def detect_process(qin,qout):
 
         img, _id = qin.get()
         if _id == 'Exit': break # When Exit is put into queue, the process should terminate
-
-        #img = cv2.cvtColor(frame_gray, cv2.COLOR_GRAY2BGR)
+        
+        if len(img.shape) == 2: # if it is a gray scale image
+            img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
 
         img_matlab = img.copy()
         tmp = img_matlab[:,:,2].copy()
@@ -571,15 +578,30 @@ def detect_process(qin,qout):
         if _id==0: # if full-size colour image
             boundingboxes, points = detect_face(img_matlab, minsize, PNet, RNet, ONet, threshold, False, factor)
         else:
-            boundingboxes, points = detect_face(img_matlab, 16, PNet, RNet, ONet, threshold, False, factor,fix_scale=True)
+            boundingboxes, points = detect_face(img_matlab, 16, PNet, RNet, ONet, threshold, False, 0.6,fix_scale=True)
 
         qout.put((boundingboxes,_id))
         #toc()
 
-def iou(a,b):
-    return 1.0
-    #TODO
 
+def IoU (a,b):
+    #a = [x1,y1,x2,y2,score]
+    w1 = a[2] - a[0] + 1
+    h1 = a[3] - a[1] + 1
+    w2 = b[2] - b[0] + 1
+    h2 = b[3] - b[1] + 1
+    xx1 = np.maximum(a[0],b[0])
+    yy1 = np.maximum(a[1],b[1])
+    xx2 = np.minimum(a[2],b[2])
+    yy2 = np.minimum(a[3],b[3])
+    w = np.maximum(0,xx2 - xx1 + 1)
+    h = np.maximum(0,yy2 - yy1 + 1)
+
+    inter = w * h
+    union = w1 * h1 + w2 * h2 - inter
+    
+    return inter / union    
+    
 def main():
 
     process_num = 3 # define the number of processes running detection task
@@ -606,12 +628,15 @@ def main():
     new_id = 1
     trackers = {}
     search_complete = True
+    gray = False
     last_time = timer()
     while True:
         print('--------------------------------------')
         #Capture frame-by-frame
         __, frame = cap.read()
+        img_gray = cv2.cvtColor(frame,cv2.COLOR_BGR2GRAY)
         #Get detection result and update trackers accordingly
+        
         det_result = []
         while not output_queue.empty():
             det_result.append(output_queue.get())
@@ -624,31 +649,52 @@ def main():
                 for box in boxes:
                     spawn = True
                     for t in trackers.values():
-                        if iou(t.get_result_bbox(),box)>0.6:
+                        if IoU(t.get_result_bbox(),box)>0.6:
                             spawn = False
                             break
                     if spawn:
-                        trackers[new_id] = Tracker(spawn_box=box,total_width=320,total_height=240,_id=new_id)
-                        trackers[new_id].update_img(frame)
+                        if not gray:
+                            trackers[new_id] = Tracker(spawn_box=box,total_width=320,total_height=240,_id=new_id,img=frame)
+                        else:
+                            trackers[new_id] = Tracker(spawn_box=box,total_width=320,total_height=240,_id=new_id,img=frame)
+                        print(trackers[new_id])
                         new_id += 1
             else:
-                if len(boxes)==0: 
-                    pass
-                    #del trackers[_id]
+                if len(boxes)!=1: 
+                    if _id in trackers.keys(): # to avoid invalid key
+                        del trackers[_id]
                 else:
-                    for box in boxes:
-                        trackers[_id].update_result(box)
-                        trackers[_id].update_img(frame)
+                    if _id in trackers.keys():
+                        for box in boxes:
+                            trackers[_id].update_result(box)
+                            if gray:
+                                trackers[_id].update_img(img_gray)
+                            else:
+                                trackers[_id].update_img(frame)
+                            print(trackers[_id])
+                        
+        #for t in trackers.values():
+        #    if not gray:
+        #        t.update_img(frame)
+        #    else:
+        #        t.update_img(img_gray)
 
         #Generate next batch of imgs to be processed by workers
         process_list = []
-        if search_complete:
-            process_list.append((frame,0))
+        if search_complete and timer()-last_time > 1.0: # restrict search fps
+            print("search fps is {0}".format(1/(timer()-last_time)))
+            last_time = timer()
+            if not gray:
+                process_list.append((frame,0))
+            else:
+                process_list.append((img_gray,0))
         for t in trackers.values():
-            process_list.append((t.get_window_img(),t.get_id()))
+            if not t.waiting: # if the updated img has not been put into the queue
+                process_list.append((t.get_window_img(),t.get_id()))
+                t.wait()
         for data in process_list:
             input_queue.put(data)
-            print("Data of length {0} is put into input_queue".format(len(data[0])))
+            print("data size {0}".format(data[0].shape))
 
         #Generate boundingboxes to be drawn on this loop
         boundingboxes = np.ndarray((0,5))
