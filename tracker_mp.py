@@ -1,4 +1,4 @@
-
+#!/usr/bin/env python
 # -*- coding: utf-8 -*-
 
 import _init_paths
@@ -7,7 +7,10 @@ import cv2
 import numpy as np
 from python_wrapper import *
 import os
+from multiprocessing import Process, Queue
 from timeit import default_timer as timer
+from time import sleep
+from tracker import Tracker
 
 def bbreg(boundingbox, reg):
     reg = reg.T 
@@ -207,13 +210,15 @@ def generateBoundingBox(map, reg, scale, t):
 
 
 def drawBoxes(im, boxes):
+    if boxes.shape[0]==0 or boxes.shape[1]==0:
+        return im
+        
     x1 = boxes[:,0]
     y1 = boxes[:,1]
     x2 = boxes[:,2]
     y2 = boxes[:,3]
     for i in range(x1.shape[0]):
         cv2.rectangle(im, (int(x1[i]), int(y1[i])), (int(x2[i]), int(y2[i])), (0,255,0), 1)
-    print("draw box.")
     return im
 
 from time import time
@@ -224,7 +229,7 @@ def toc(fmt="Elapsed: %s s"):
     print(fmt % (time()-_tstart_stack.pop()))
 
 
-def detect_face(img, minsize, PNet, RNet, ONet, threshold, fastresize, factor, singlescale = 0):
+def detect_face(img, minsize, PNet, RNet, ONet, threshold, fastresize, factor,fix_scale=False):
     
     img2 = img.copy()
 
@@ -243,33 +248,26 @@ def detect_face(img, minsize, PNet, RNet, ONet, threshold, fastresize, factor, s
     #total_boxes = np.load('total_boxes_242.npy')
     #total_boxes = np.load('total_boxes_101.npy')
 
-    if singlescale == 0:
-        print('image pyramid')
-        # create scale pyramid
+    
+    # create scale pyramid
+    if not fix_scale:
         scales = []
         while minl >= 12:
             scales.append(m * pow(factor, factor_count))
             minl *= factor
             factor_count += 1
+        scales = [0.128, 0.08, 0.148, 0.4, 0.1]
     else:
-        print('single scale')
-        scale = [0.75, 0.45, 0.27, 0.162, 0.09]
-        scales = []
-        for i in scale:
-            if minl * i >= 12:
-                scales. append(i)
-        print("scale list:", scales)
-
-    
+        scales = [0.75]
     # first stage
-    t_start = timer()
+    #scales = [0.128, 0.08, 0.148, 0.4, 0.1]
+    #tic()
+    
+
     for scale in scales:
         hs = int(np.ceil(h*scale))
         ws = int(np.ceil(w*scale))
-        
-        #im_debug = cv2.resize(img,(ws,hs))
-        #pause_show(im_debug,'pyramid')
-        
+
         if fastresize:
             im_data = (img-127.5)*0.0078125 # [0,255] -> [-1,1]
             im_data = cv2.resize(im_data, (ws,hs)) # default is bilinear
@@ -283,8 +281,6 @@ def detect_face(img, minsize, PNet, RNet, ONet, threshold, fastresize, factor, s
         im_data = np.array([im_data], dtype = np.float)
         PNet.blobs['data'].reshape(1, 3, ws, hs)
         PNet.blobs['data'].data[...] = im_data
-        
-
         out = PNet.forward()
     
         boxes = generateBoundingBox(out['prob1'][0,1,:,:], out['conv4-2'][0], scale, threshold[0])
@@ -292,30 +288,29 @@ def detect_face(img, minsize, PNet, RNet, ONet, threshold, fastresize, factor, s
             #print boxes[4:9]
             #print 'im_data', im_data[0:5, 0:5, 0], '\n'
             #print 'prob1', out['prob1'][0,0,0:3,0:3]
-            
-            t_start = timer()
+
             pick = nms(boxes, 0.5, 'Union')
-            t_end = timer()
-            #print("Time for NMS {0}".format(t_end-t_start))
-            
+
             if len(pick) > 0 :
                 boxes = boxes[pick, :]
 
         if boxes.shape[0] != 0:
             total_boxes = np.concatenate((total_boxes, boxes), axis=0)
-            print("find box scale", scale)
-    
-    t_end = timer()
-    #print("Time for PNet.forward {0}".format(t_end-t_start))
+         
     #np.save('total_boxes_101.npy', total_boxes)
 
     #####
     # 1 #
     #####
-    #print("[1]:",total_boxes.shape[0])
+    #print("Pnet boxes:",total_boxes.shape[0])
+    #print("Pnet time:")
+    #toc()
+
     #print total_boxes
     #return total_boxes, [] 
 
+    
+    #tic()
 
     numbox = total_boxes.shape[0]
     if numbox > 0:
@@ -396,11 +391,7 @@ def detect_face(img, minsize, PNet, RNet, ONet, threshold, fastresize, factor, s
         
         RNet.blobs['data'].reshape(numbox, 3, 24, 24)
         RNet.blobs['data'].data[...] = tempimg
-        
-        t_start = timer()
         out = RNet.forward()
-        t_end = timer()
-        #print("Time for RNet.forward {0}".format(t_end-t_start))
 
         #print out['conv5-2'].shape
         #print out['prob1'].shape
@@ -429,12 +420,15 @@ def detect_face(img, minsize, PNet, RNet, ONet, threshold, fastresize, factor, s
                 #print("[7]:",total_boxes.shape[0])
                 total_boxes = rerec(total_boxes)
                 #print("[8]:",total_boxes.shape[0])
-            
+        #print("Rnet time:")
+        #toc()
+      
         #####
         # 2 #
         #####
         #print("2:",total_boxes.shape)
 
+        #tic()
         numbox = total_boxes.shape[0]
         if numbox > 0:
             # third stage
@@ -461,11 +455,7 @@ def detect_face(img, minsize, PNet, RNet, ONet, threshold, fastresize, factor, s
             tempimg = np.swapaxes(tempimg, 1, 3)
             ONet.blobs['data'].reshape(numbox, 3, 48, 48)
             ONet.blobs['data'].data[...] = tempimg
-            
-            t_start = timer()
             out = ONet.forward()
-            t_end = timer()
-            #print("Time for ONet.forward {0}".format(t_end-t_start))
             
             score = out['prob1'][:,1]
             points = out['conv6-3']
@@ -497,7 +487,8 @@ def detect_face(img, minsize, PNet, RNet, ONet, threshold, fastresize, factor, s
     # 3 #
     #####
     #print("3:",total_boxes.shape)
-
+    #print("Onet time:")
+    #toc()
     return total_boxes, points
 
 
@@ -537,140 +528,152 @@ def haveFace(img, facedetector):
     containFace = (True, False)[boundingboxes.shape[0]==0]
     return containFace, boundingboxes
 
-def pause_show(img=None,title=None):
-    if not (img is None or title is None):
-        cv2.imshow(title,img)
-    while(cv2.waitKey(0)!=27):
-        pass
-        
-def gen_crop_img(frame,bboxes):
-    """
-    Generate cropped images according to bounding boxes to reduce input size
-    :param frame: current frame
-    :param bboxes: last bounding box
-    :return: a list of (original,(0,0)) + (cropped, (x1,y1,w,h))
-    """
-    img_list = []
-    img_cod = []
-    for bbox in bboxes:
-        x1 = bbox[0]
-        y1 = bbox[1]
-        x2 = bbox[2]
-        y2 = bbox[3]
-        w = x2-x1
-        h = y2-y1
-        y1 = max(0,y1-w*0.2)
-        y2 = min(240,y2+w*0.2)
-        x1 = max(0,x1-w*0.2)
-        x2 = min(320,x2+w*0.2)
-        img_list.append(frame[int(y1):int(y2)+1,int(x1):int(x2)+1])
-        img_cod.append((int(x1),int(y1),int(x2),int(y2)))
-    return img_list,img_cod
+def start_process(p_list):
+    for i in range(len(p_list)):
+        p_list[i].start()
 
-def offset_bboxes(bboxes,cod):
-    """
-    offset bboxes as defined in cod
-    """
-    for box in bboxes:
-        box[0] += cod[0]
-        box[1] += cod[0]
-        box[2] += cod[1]
-        box[3] += cod[1]
-    
-    return bboxes
+def join_process(p_list):
+    for i in range(len(p_list)):
+        p_list[i].join()
 
-
-def main():
-    cap = cv2.VideoCapture(0)
-
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH,320)
-    cap.set(cv2.CAP_PROP_FRAME_HEIGHT,240)
+def detect_process(qin,qout):
     minsize = 20
 
     caffe_model_path = "./model"
 
     threshold = [0.6, 0.7, 0.7]
-    factor = 0.709
-    
+    factor = 0.08
+
     caffe.set_mode_cpu()
     PNet = caffe.Net(caffe_model_path+"/det1.prototxt", caffe_model_path+"/det1.caffemodel", caffe.TEST)
     RNet = caffe.Net(caffe_model_path+"/det2.prototxt", caffe_model_path+"/det2.caffemodel", caffe.TEST)
     ONet = caffe.Net(caffe_model_path+"/det3.prototxt", caffe_model_path+"/det3.caffemodel", caffe.TEST)
-    
-    count_whole = 0
-    count_crop = 0
-    while True: 
-        count_whole += 1
-        #Capture frame-by-frame
-        print("---------------------------")
-        __, frame = cap.read()
 
-        
-        img = frame
+    qout.put(('Initialized',None)) # signal main process that initialization has completed
+
+    while True:
+        if qin.empty():
+            continue
+
+        img, _id = qin.get()
+        if _id == 'Exit': break # When Exit is put into queue, the process should terminate
+
+        #img = cv2.cvtColor(frame_gray, cv2.COLOR_GRAY2BGR)
+
         img_matlab = img.copy()
         tmp = img_matlab[:,:,2].copy()
         img_matlab[:,:,2] = img_matlab[:,:,0]
         img_matlab[:,:,0] = tmp
-        #print('get whole frame')
-        # check rgb position
-        #tic()
-        t_start = timer()
-        boundingboxes, points = detect_face(img_matlab, minsize, PNet, RNet, ONet, threshold, False, factor, 0)
-        #boundingboxes, points = detect_face(img_matlab, 12, PNet, RNet, ONet, threshold, False, 0.9)
-        #print('whole, boxes, detected')
-        t_end = timer()
-        print("Runtime for whole image:",t_end-t_start)
-        #print("whole image", count_whole)
-        if len(boundingboxes)!=0:
-            c_img_list, __ = gen_crop_img(frame,boundingboxes)
-            count_crop += 1
-        else:
-            continue
-        
 
-        c_img = c_img_list[0].copy()
-        c_img_matlab = c_img.copy()
-        c_tmp = c_img_matlab[:,:,2].copy()
-        c_img_matlab[:,:,2] = c_img_matlab[:,:,0]
-        c_img_matlab[:,:,0] = c_tmp
-        #print('cropped')
-        
-        #pause_show(c_img_matlab, 'before detect')
-        pause_show(c_img, 'cropped')
-        t_start = timer()
-        c_boundingboxes, points = detect_face(c_img_matlab, 16, PNet, RNet, ONet, [0.9, 0.7, 0.7], False, 0.6, 1)
-        #print('crop-image detected')
-        t_end = timer()
-        print("Runtime for cropped image:",t_end-t_start)
-        #print("cropped image", count_crop)
-        t_end = timer()
+        # check rgb position
+
+        #tic()
+        if _id==0: # if full-size colour image
+            boundingboxes, points = detect_face(img_matlab, minsize, PNet, RNet, ONet, threshold, False, factor)
+        else:
+            boundingboxes, points = detect_face(img_matlab, 16, PNet, RNet, ONet, threshold, False, factor,fix_scale=True)
+
+        qout.put((boundingboxes,_id))
         #toc()
 
-        ## copy img to positive folder
-        #if boundingboxes.shape[0] > 0 :
-        #    import shutil
-        #    shutil.copy(imgpath, '/home/duino/Videos/3/disdata/positive/'+os.path.split(imgpath)[1] )
-        #else:
-        #    import shutil
-        #    shutil.copy(imgpath, '/home/duino/Videos/3/disdata/negetive/'+os.path.split(imgpath)[1] ) 
+def iou(a,b):
+    return 1.0
+    #TODO
 
+def main():
+
+    process_num = 3 # define the number of processes running detection task
+
+    cap = cv2.VideoCapture(0)
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH,320)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT,240)
+
+    input_queue = Queue(5)
+    output_queue = Queue()
+
+    detect_p_list = []
+    for i in range(process_num):
+        detect_p_list.append(Process(target=detect_process,args=(input_queue,output_queue)))
+        detect_p_list[i].daemon = True
+
+    start_process(detect_p_list)
+
+    # wait for detection process's initialization
+    i = process_num
+    while i != 0:
+        if output_queue.get()[0] == 'Initialized': i -= 1
+
+    new_id = 1
+    trackers = {}
+    search_complete = True
+    last_time = timer()
+    while True:
+        print('--------------------------------------')
+        #Capture frame-by-frame
+        __, frame = cap.read()
+        #Get detection result and update trackers accordingly
+        det_result = []
+        while not output_queue.empty():
+            det_result.append(output_queue.get())
+        for result in det_result:
+            print("result:",result[0])
+            _id = result[1]
+            boxes = result[0]
+            if _id==0:
+                search_complete = True
+                for box in boxes:
+                    spawn = True
+                    for t in trackers.values():
+                        if iou(t.get_result_bbox(),box)>0.6:
+                            spawn = False
+                            break
+                    if spawn:
+                        trackers[new_id] = Tracker(spawn_box=box,total_width=320,total_height=240,_id=new_id)
+                        trackers[new_id].update_img(frame)
+                        new_id += 1
+            else:
+                if len(boxes)==0: 
+                    pass
+                    #del trackers[_id]
+                else:
+                    for box in boxes:
+                        trackers[_id].update_result(box)
+                        trackers[_id].update_img(frame)
+
+        #Generate next batch of imgs to be processed by workers
+        process_list = []
+        if search_complete:
+            process_list.append((frame,0))
+        for t in trackers.values():
+            process_list.append((t.get_window_img(),t.get_id()))
+        for data in process_list:
+            input_queue.put(data)
+            print("Data of length {0} is put into input_queue".format(len(data[0])))
+
+        #Generate boundingboxes to be drawn on this loop
+        boundingboxes = np.ndarray((0,5))
+        for t in trackers.values():
+            boundingboxes = np.concatenate((boundingboxes,np.array([t.get_result_bbox()])))
+
+        #Show image
+        img = frame.copy()
         img = drawBoxes(img, boundingboxes)
-        #print(img)
-        pause_show(img,'img')
-
-        #print('whole, draw')
+        cv2.imshow('img', img)
         
-        #pause_show(c_img, 'before drawing')
-        if c_boundingboxes.shape[0] == 1:
-            print("cropped image face detected!")
-        pause_show(drawBoxes(c_img,c_boundingboxes),'crop_det')
-        #cv2.imshow('crop_det', drawBoxes(c_img,c_boundingboxes))
-        #pause_show(c_img, 'after drawing')
-        
+        for t in trackers.values():
+            cv2.imshow('tracker window', t.get_window_img())
 
+        if cv2.waitKey(1) &0xFF == ord('q'):
+            break
 
-        #if boundingboxes.shape[0] > 0:
-        #    error.append[imgpath]
+    #Terminate subprocesses
+    for i in range(process_num):
+        input_queue.put((None,'Exit'))
+    join_process(detect_p_list)
+
+    #When everything's done, release capture
+    cap.release()
+    cv2.destroyAllWindows()
 
 
 if __name__ == "__main__":

@@ -216,6 +216,21 @@ def drawBoxes(im, boxes):
     print("draw box.")
     return im
 
+def c_drawBoxes(original_im, boxes):
+    ratio = original_im.shape[0]/original_im.shape[1]
+    ratio_0 = original_im.shape[0]/20
+    ratio_1 = original_im.shape[1]/20
+    x1 = boxes[:,0]
+    y1 = boxes[:,1]
+    x2 = boxes[:,2]
+    y2 = boxes[:,3]
+    for i in range(x1.shape[0]):
+        if ratio <=1:
+            cv2.rectangle(original_im, (int(x1[i]*ratio_0), int(y1[i]*ratio_0)), (int(x2[i]*ratio_0), int(y2[i]*ratio_0)), (0,255,0), 1)
+        if ratio >1:
+            cv2.rectangle(original_im, (int(x1[i]*ratio_1), int(y1[i]*ratio_1)), (int(x2[i]*ratio_1), int(y2[i]*ratio_1)), (0,255,0), 1)
+    print("draw box.")
+    return original_im
 from time import time
 _tstart_stack = []
 def tic():
@@ -253,13 +268,7 @@ def detect_face(img, minsize, PNet, RNet, ONet, threshold, fastresize, factor, s
             factor_count += 1
     else:
         print('single scale')
-        scale = [0.75, 0.45, 0.27, 0.162, 0.09]
-        scales = []
-        for i in scale:
-            if minl * i >= 12:
-                scales. append(i)
-        print("scale list:", scales)
-
+        scales = [0.75]
     
     # first stage
     t_start = timer()
@@ -637,8 +646,18 @@ def main():
         
         #pause_show(c_img_matlab, 'before detect')
         pause_show(c_img, 'cropped')
+        print(c_img_matlab.shape)
+        c_img_ratio = c_img_matlab.shape[0]/c_img_matlab.shape[1]
+        tic()
+        if c_img_ratio <= 1:
+            c_resized = cv2.resize(c_img_matlab, (int(20/c_img_ratio)), 20)
+        if c_img_ratio > 1:
+            c_resized = cv2.resize(c_img_matlab, (20, int(20*c_img_ratio) ))
+        toc()
+        pause_show(c_resized, 'resized')
+        print('c_img_ratio:', c_img_ratio)
         t_start = timer()
-        c_boundingboxes, points = detect_face(c_img_matlab, 16, PNet, RNet, ONet, [0.9, 0.7, 0.7], False, 0.6, 1)
+        c_boundingboxes, points = detect_face(c_resized, 16, PNet, RNet, ONet, [0.9, 0.7, 0.7], False, 0.6, 1)
         #print('crop-image detected')
         t_end = timer()
         print("Runtime for cropped image:",t_end-t_start)
@@ -663,7 +682,7 @@ def main():
         #pause_show(c_img, 'before drawing')
         if c_boundingboxes.shape[0] == 1:
             print("cropped image face detected!")
-        pause_show(drawBoxes(c_img,c_boundingboxes),'crop_det')
+        pause_show(c_drawBoxes(c_img,c_boundingboxes),'crop_det')
         #cv2.imshow('crop_det', drawBoxes(c_img,c_boundingboxes))
         #pause_show(c_img, 'after drawing')
         
